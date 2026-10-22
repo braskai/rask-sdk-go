@@ -9,10 +9,12 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	rask "github.com/braskai/rask-sdk-go"
 	"github.com/google/uuid"
@@ -366,5 +368,71 @@ func TestAuthError(t *testing.T) {
 	var authErr *rask.AuthError
 	if !errors.As(err, &authErr) || !strings.Contains(err.Error(), "invalid_client") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestUploadUnauthorizedDropsToken(t *testing.T) {
+	f := newFake(t)
+	f.api = func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer token-2" {
+			t.Errorf("request after a rejected upload used %q, want a new token", got)
+		}
+		writeJSON(w, 200, map[string]any{"minutes": map[string]any{"total": 1}})
+	}
+	f.rejectFirst.Store(true)
+	c := f.client(t)
+
+	// A streamed upload can't be replayed, so its 401 is returned...
+	_, err := c.CreateMediaFile(context.Background(), "clip.mp4", strings.NewReader("video"), nil)
+	var apiErr *rask.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("err = %v", err)
+	}
+	// ...but the rejected token is dropped, so the next request gets a new one.
+	if _, err := c.GetCredits(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.tokenCalls.Load(); n != 2 {
+		t.Fatalf("token requests = %d, want 2", n)
+	}
+}
+
+func TestUploadInputValidation(t *testing.T) {
+	f := newFake(t)
+	c := f.client(t)
+	if _, err := c.CreateMediaFile(context.Background(), "clip.mp4", nil, nil); err == nil {
+		t.Fatal("expected an error for a nil file")
+	}
+}
+
+func TestUploadNotSentDoesNotLeakWriter(t *testing.T) {
+	f := newFake(t)
+	f.api = func(w http.ResponseWriter, r *http.Request) { t.Error("request must not be sent") }
+	c := f.client(t)
+	before := runtime.NumGoroutine()
+
+	failEditor := func(ctx context.Context, req *http.Request) error { return errors.New("editor failed") }
+	_, err := c.CreateMediaFile(context.Background(), "clip.mp4", strings.NewReader(strings.Repeat("x", 1<<20)), nil, failEditor)
+	if err == nil || !strings.Contains(err.Error(), "editor failed") {
+		t.Fatalf("err = %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > before {
+		t.Fatalf("goroutines = %d, want <= %d: multipart writer still blocked", n, before)
+	}
+}
+
+func TestAPIErrorWithoutRaskFields(t *testing.T) {
+	f := newFake(t)
+	f.api = func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Bad gateway"})
+	}
+	_, err := f.client(t).GetCredits(context.Background())
+	var apiErr *rask.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway || !strings.Contains(apiErr.Detail, "Bad gateway") {
+		t.Fatalf("err = %#v", err)
 	}
 }

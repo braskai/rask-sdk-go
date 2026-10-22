@@ -79,14 +79,15 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil || resp.StatusCode != http.StatusUnauthorized || t.tokens.static != "" {
 		return resp, err
 	}
-	// The token may have been revoked or expired early: refresh it and retry
-	// once, if the request body can be replayed.
+	// The token may have been revoked or expired early: drop it, and retry
+	// once with a new token if the request body can be replayed. Streamed
+	// uploads can't be, so they return the 401 and the next request refreshes.
+	t.tokens.invalidate(used)
 	if req.Body != nil && req.GetBody == nil {
 		return resp, nil
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	t.tokens.invalidate(used)
 
 	retry := req
 	if req.GetBody != nil {

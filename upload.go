@@ -16,9 +16,13 @@ import (
 //
 // Corresponds with POST /api/library/v1/media (the `createMediaFile` operationId).
 func (c *Client) CreateMediaFile(ctx context.Context, filename string, file io.Reader, params *CreateMediaFileParams, reqEditors ...RequestEditorFn) (*MediaGet, error) {
+	if file == nil {
+		return nil, fmt.Errorf("rask: file is required")
+	}
 	body, contentType := streamMultipart(func(w *multipart.Writer) error {
 		return writeFile(w, "data", filename, file)
 	})
+	defer body.Close()
 	return unwrap(c.api.CreateMediaFileWithBodyWithResponse(ctx, params, contentType, body, reqEditors...))
 }
 
@@ -42,12 +46,14 @@ func (c *Client) CreateTranscriptionSrt(ctx context.Context, params *CreateTrans
 		}
 		return nil
 	})
+	defer body.Close()
 	return unwrap(c.api.CreateTranscriptionSrtWithBodyWithResponse(ctx, params, contentType, body, reqEditors...))
 }
 
 // streamMultipart writes a multipart body through a pipe so it is produced
-// while the request is being sent.
-func streamMultipart(write func(*multipart.Writer) error) (io.Reader, string) {
+// while the request is being sent. Callers must close the returned reader:
+// if the request fails before the body is read, closing it stops the writer.
+func streamMultipart(write func(*multipart.Writer) error) (io.ReadCloser, string) {
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 	go func() {

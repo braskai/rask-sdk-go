@@ -47,6 +47,11 @@ func newAPIError(status int, body []byte) *APIError {
 		return e
 	}
 	e.Status = payload.Status
+	if e.Status == "" && len(payload.Detail) == 0 {
+		// Not a Rask error body, e.g. {"message": "..."} from a gateway.
+		e.Detail = strings.TrimSpace(string(body))
+		return e
+	}
 	// detail is a string for most errors and a list of validation errors for 422.
 	var detail string
 	if json.Unmarshal(payload.Detail, &detail) == nil {

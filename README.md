@@ -14,7 +14,7 @@ Requires Go 1.24 or later.
 
 ## Authentication
 
-The API uses OAuth 2.0 client credentials. Pass your client ID and secret to `NewClient`. The client fetches an access token on the first request, caches it until shortly before it expires, and refreshes it once if the API answers `401`.
+The API uses OAuth 2.0 client credentials. Pass your client ID and secret to `NewClient`. The client fetches an access token on the first request and caches it until shortly before it expires. If the API answers `401`, the client drops the token and retries the request once with a new one. Streamed file uploads can't be replayed, so they return the `401` as an error instead, and the next request uses a new token.
 
 ```go
 client, err := rask.NewClient(os.Getenv("RASK_CLIENT_ID"), os.Getenv("RASK_CLIENT_SECRET"))
@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	rask "github.com/braskai/rask-sdk-go"
@@ -65,6 +66,9 @@ func main() {
 
 	// 3. Wait until dubbing is finished.
 	for project.Status == nil || *project.Status != rask.ProjectStatusMergingDone {
+		if project.Status != nil && failed(*project.Status) {
+			log.Fatalf("dubbing failed: %s", *project.Status)
+		}
 		time.Sleep(10 * time.Second)
 		if project, err = client.GetProject(ctx, project.Id); err != nil {
 			log.Fatal(err)
@@ -72,9 +76,18 @@ func main() {
 	}
 	fmt.Println("translated video:", *project.TranslatedVideo)
 }
+
+// failed reports whether a project stopped without finishing.
+func failed(s rask.ProjectStatus) bool {
+	switch s {
+	case rask.ProjectStatusForbiddenLink, rask.ProjectStatusNoAudio, rask.ProjectStatusNoWords:
+		return true
+	}
+	return strings.HasSuffix(string(s), "failed")
+}
 ```
 
-A complete example that also handles failed projects is in [examples/quickstart](examples/quickstart/main.go).
+A runnable version is in [examples/quickstart](examples/quickstart/main.go).
 
 ### Upload a file
 
