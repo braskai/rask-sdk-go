@@ -22,6 +22,8 @@ client, err := rask.NewClient(os.Getenv("RASK_CLIENT_ID"), os.Getenv("RASK_CLIEN
 
 To use a token you obtained yourself, pass empty credentials and `rask.WithAccessToken(token)`.
 
+Optional request fields are pointers; `rask.Ptr("value")` returns a pointer to any value.
+
 Other options: `WithBaseURL`, `WithTokenURL`, `WithScopes`, `WithHTTPClient` (timeouts, proxies, custom transports) and `WithUserAgent`.
 
 ## Quickstart
@@ -47,10 +49,9 @@ func main() {
 	}
 
 	// 1. Upload a video by link (or with client.CreateMediaFile).
-	kind := rask.MediaKindVideo
 	media, err := client.CreateMediaLink(ctx, rask.MediaCreateFromLink{
 		Link: "https://example.com/video.mp4",
-		Kind: &kind,
+		Kind: rask.Ptr(rask.MediaKindVideo),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -86,8 +87,7 @@ if err != nil {
 }
 defer f.Close()
 
-kind := rask.MediaKindVideo
-media, err := client.CreateMediaFile(ctx, "video.mp4", f, &rask.CreateMediaFileParams{Kind: &kind})
+media, err := client.CreateMediaFile(ctx, "video.mp4", f, &rask.CreateMediaFileParams{Kind: rask.Ptr(rask.MediaKindVideo)})
 ```
 
 Uploads can take a while; bound them with a context deadline rather than a short `http.Client.Timeout`.
@@ -95,8 +95,7 @@ Uploads can take a while; bound them with a context deadline rather than a short
 ### List projects
 
 ```go
-name := "demo"
-page, err := client.GetProjects(ctx, &rask.GetProjectsParams{Offset: 0, Limit: 10, Name: &name})
+page, err := client.GetProjects(ctx, &rask.GetProjectsParams{Offset: 0, Limit: 10, Name: rask.Ptr("demo")})
 ```
 
 ## Errors

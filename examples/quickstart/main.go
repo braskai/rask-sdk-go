@@ -32,8 +32,7 @@ func main() {
 	}
 	fmt.Printf("credits: %+v\n", credits)
 
-	kind := rask.MediaKindVideo
-	media, err := client.CreateMediaLink(ctx, rask.MediaCreateFromLink{Link: videoURL, Kind: &kind})
+	media, err := client.CreateMediaLink(ctx, rask.MediaCreateFromLink{Link: videoURL, Kind: rask.Ptr(rask.MediaKindVideo)})
 	if err != nil {
 		log.Fatal(err)
 	}
