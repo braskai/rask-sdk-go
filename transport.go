@@ -326,7 +326,8 @@ func problemCode(body []byte) string {
 func (c *Client) backoff(attempt int) time.Duration {
 	wait := float64(backoffInitial) * math.Pow(backoffFactor, float64(attempt))
 	wait *= backoffJitterFrom + c.rand()/2
-	return min(time.Duration(wait), backoffMax)
+	// Capped as a float: one beyond int64 converts to whatever the processor gives, a negative duration on amd64.
+	return time.Duration(min(wait, float64(backoffMax)))
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {

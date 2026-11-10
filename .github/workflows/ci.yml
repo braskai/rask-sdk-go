@@ -22,7 +22,9 @@ jobs:
           go-version: ${{ matrix.go }}
       - name: Build
         run: make build
+      # The pinned linter is built with an older Go than `stable`, and cannot read a newer standard library.
       - name: Lint
+        if: matrix.go == '1.25'
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.12.2
