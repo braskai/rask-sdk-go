@@ -1,0 +1,93 @@
+name: Release
+
+# A Go module has no registry to upload to: its version is its tag. This checks the default branch, tags the version in
+# version.go, makes the GitHub Release, and then asks the Go module proxy and the checksum database for the version.
+# From then on `go get github.com/braskai/rask-sdk-go/v3@<tag>` works and the version cannot change.
+# Started by hand and only from the default branch: `gh workflow run release.yml`, or "Run workflow" on the Actions tab.
+# So the tag appears only after the checks pass. RELEASING.md has the steps.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Tag the version
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the tag and the GitHub Release
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      module: ${{ steps.version.outputs.module }}
+    steps:
+      - name: Only from the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::A release is cut from $DEFAULT_BRANCH, and this run is on $GITHUB_REF_NAME."
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: The version is new
+        id: version
+        run: |
+          version=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' version.go)
+          module=$(sed -n 's/^module //p' go.mod)
+          if [ -z "$version" ]; then
+            echo "::error::version.go does not say which version this is."
+            exit 1
+          fi
+          # From v2 on, the major version is the end of a module's path.
+          major="v${version%%.*}"
+          case "$module" in
+            */"$major") ;;
+            *)
+              echo "::error::$version is not a version of $module: the major version must end the module path."
+              exit 1
+              ;;
+          esac
+          tagged=0
+          git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null || tagged=$?
+          if [ "$tagged" != 2 ]; then
+            echo "::error::v$version is already tagged, or that could not be checked (tag lookup $tagged, where 2 means no tag). Set the next version in version.go first."
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "module=$module" >> "$GITHUB_OUTPUT"
+      - name: Tag the version and make the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -- "v$VERSION" --target "$GITHUB_SHA" --generate-notes
+          case "$VERSION" in *-*) set -- "$@" --prerelease ;; esac
+          gh release create "$@"
+
+  # A job of its own, so that it can be run again by itself: a second run of the job above stops at the tag it made.
+  proxy:
+    name: Ask the proxy and the checksum database for the version
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          VERSION: ${{ needs.release.outputs.version }}
+          MODULE: ${{ needs.release.outputs.module }}
+        run: |
+          curl -fsS --retry 5 --retry-delay 10 --retry-all-errors "https://proxy.golang.org/$MODULE/@v/v$VERSION.info"
+          echo
+          record=$(curl -fsS --retry 5 --retry-delay 10 --retry-all-errors "https://sum.golang.org/lookup/$MODULE@v$VERSION")
+          echo "$record" | head -n 3

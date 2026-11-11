@@ -1,0 +1,66 @@
+name: CI
+
+# Builds, lints and tests. release.yml calls this before it publishes a version.
+on:
+  push:
+    branches: [main, initial]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25", "stable"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Build
+        run: make build
+      # The pinned linter is built with an older Go than `stable`, and cannot read a newer standard library.
+      - name: Lint
+        if: matrix.go == '1.25'
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+      - name: Vet and format
+        run: |
+          go vet ./...
+          test -z "$(gofmt -l .)"
+      - name: Test
+        run: make test
+      - name: Generated code is up to date
+        if: matrix.go == 'stable'
+        run: make check-generated
+
+  # The shared acceptance harness is its own repository. `make test` above skips the acceptance suite and says so.
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          repository: braskai/rask-sdk-acceptance
+          path: .harness
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Acceptance suite
+        env:
+          RASK_SDK_ACCEPTANCE_BIN: ${{ github.workspace }}/.harness/bin/rask-sdk-acceptance.mjs
+        run: make acceptance

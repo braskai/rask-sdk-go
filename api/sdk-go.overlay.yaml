@@ -1,0 +1,17 @@
+# The one change this SDK makes to the contract before oapi-codegen reads it (v2.8.x; pinned config:
+# always-prefix-enum-values, skip-prune, nullable-type): Idempotency-Key is optional in SDK signatures, because the
+# SDK sends one itself. There is no enum rewrite: the contract as it is already generates `type X string` and keeps
+# unknown values, and anyOf [XKnown, string] would make every open enum a union struct. Unknown union variants stay
+# raw JSON (json.RawMessage).
+overlay: 1.0.0
+info:
+  title: 'Rask API v3: Go fallback generator (oapi-codegen)'
+  version: 1.0.0
+actions:
+- target: $.components.parameters.IdempotencyKey
+  description: 'SDK-12: optional in SDK signatures; the SDK injects the key (S4). The base spec keeps it required.'
+  update:
+    required: false
+    description: 'A unique key per logical request (SDKs send a bare UUIDv4; an RFC 9651 quoted string is accepted and unquoted);
+      reuse it unchanged on retries. Kept 24 h per (workspace, acting user). Optional in SDKs: when omitted, the SDK generates
+      a UUIDv4 per call and reuses it across retries (S4).'
