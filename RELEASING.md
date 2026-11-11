@@ -14,7 +14,8 @@ A Go module has no registry to upload to: its version is its tag. A release is a
    minutes later.
 
 The workflow refuses a tag that is not the version in `version.go`, and a tag that is not on the default branch.
-Once the checksum database has a version, it cannot change. If the workflow fails before its last step, delete the
-release and its tag, fix the cause and publish again. After that step, release the next version instead.
+A tag that was public, even for a minute, may already be in the proxy or in someone's module cache, and once the
+checksum database has a version it cannot change. So a tag is never moved or reused: if the workflow fails, fix the
+cause and release the next version.
 
 Nothing to set up: the workflow needs no secrets.
