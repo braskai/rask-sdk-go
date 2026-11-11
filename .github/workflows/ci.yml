@@ -1,9 +1,11 @@
 name: CI
 
+# Builds, lints and tests. release.yml calls this before it publishes a version.
 on:
   push:
     branches: [main, initial]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read

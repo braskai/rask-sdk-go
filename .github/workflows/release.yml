@@ -1,0 +1,60 @@
+name: Release
+
+# A Go module has no registry to upload to: its version is its tag. When a GitHub Release is published, this checks the
+# tagged commit and then asks the Go module proxy and the checksum database for the version. From then on
+# `go get github.com/braskai/rask-sdk-go/v3@<tag>` works and the version cannot change. RELEASING.md has the steps.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to the Go module proxy
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: The tag is this version, on the default branch
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          version=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' version.go)
+          module=$(sed -n 's/^module //p' go.mod)
+          if [ -z "$version" ] || [ "$TAG" != "v$version" ]; then
+            echo "::error::The release tag is $TAG and version.go says $version: the tag must be v$version."
+            exit 1
+          fi
+          # From v2 on, the major version is the end of a module's path.
+          case "$module" in
+            */"${TAG%%.*}") ;;
+            *)
+              echo "::error::$TAG is not a version of $module: the major version must end the module path."
+              exit 1
+              ;;
+          esac
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::$TAG is not on $DEFAULT_BRANCH: a release is cut from reviewed code only."
+            exit 1
+          fi
+          echo "MODULE=$module" >> "$GITHUB_ENV"
+      - name: Ask the proxy and the checksum database for the version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          curl -fsS --retry 5 --retry-delay 10 --retry-all-errors "https://proxy.golang.org/$MODULE/@v/$TAG.info"
+          echo
+          curl -fsS --retry 5 --retry-delay 10 --retry-all-errors "https://sum.golang.org/lookup/$MODULE@$TAG" | head -n 3
