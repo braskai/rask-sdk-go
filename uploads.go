@@ -145,10 +145,12 @@ func (s *UploadsService) put(ctx context.Context, created *Response[api.Upload],
 			continue
 		}
 		failures++
-		if !outcome.retryable || failures > uploadMaxRetries {
+		wait := max(c.backoff(failures-1), outcome.retryAfter)
+		// Storage names its own wait and nothing else bounds it, so one past the budget of an API call ends the retries
+		// here as it does there.
+		if !outcome.retryable || failures > uploadMaxRetries || wait > retryBudget {
 			return &UploadError{UploadID: id, Attempts: failures, Status: outcome.status, Err: outcome.err, Detail: outcome.detail}
 		}
-		wait := max(c.backoff(failures-1), outcome.retryAfter)
 		if err := c.sleep(ctx, wait); err != nil {
 			return &UploadError{UploadID: id, Attempts: failures, Status: outcome.status, Err: err}
 		}

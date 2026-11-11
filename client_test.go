@@ -605,6 +605,30 @@ func TestUploadStreamWhoseSeekFailsIsSentWholeOnEveryAttempt(t *testing.T) {
 	}
 }
 
+// Nothing but storage's own word bounds the wait before the next PUT. An hour is past what any call waits.
+func TestUploadEndsAtOnceWhenStorageAsksForAWaitPastTheBudget(t *testing.T) {
+	storage := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(503)
+	})
+	apiServer := newRecorder(t, uploadAPI(t, func() string { return storage.URL + "/o?X-Amz-Signature=s" }))
+	client := newTestClient(t, apiServer.URL+"/rask/v3")
+	// Without the bound the call sleeps the hour, and this deadline is what ends it.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := client.Uploads.UploadFile(ctx, rask.UploadFileParams{Reader: strings.NewReader("x"), Filename: "a.mp3"})
+	var failed *rask.UploadError
+	if !errors.As(err, &failed) || failed.Status != 503 || failed.Attempts != 1 {
+		t.Fatalf("got %T %v", err, err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the upload waited for storage: %v", err)
+	}
+	if puts := storage.seen(); len(puts) != 1 {
+		t.Fatalf("%d PUTs", len(puts))
+	}
+}
+
 func TestUploadArgumentsAreCheckedBeforeAnyRequest(t *testing.T) {
 	server := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, meJSON) })
 	client := newTestClient(t, server.URL)
