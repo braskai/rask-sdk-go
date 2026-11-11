@@ -1,6 +1,6 @@
 # Rask Go SDK
 
-The Go client for the [Rask API v3](https://docs.api.rask.ai). Version 3.0.0-alpha.0: not published yet.
+The Go client for the [Rask API v3](https://docs.api.rask.ai). Version 3.0.0-alpha.0.
 
 ```shell
 go get github.com/braskai/rask-sdk-go/v3
