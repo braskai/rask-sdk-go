@@ -28,8 +28,9 @@ const (
 type UploadFileParams struct {
 	// Path is a file to upload.
 	Path string
-	// Reader is a stream to upload. An io.ReadSeeker is re-read from its current offset on a retry; any other reader
-	// is first copied to a temporary file, because storage takes the file whole on every attempt.
+	// Reader is a stream to upload. An io.ReadSeeker is re-read from its current offset on a retry; any other reader,
+	// and one whose Seek fails (os.Stdin as a pipe), is first copied to a temporary file, because storage takes the
+	// file whole on every attempt.
 	Reader io.Reader
 	// Size is optional: the SDK measures the stream. When set, a stream of another length is refused before anything
 	// is sent.
@@ -334,12 +335,19 @@ func (s *uploadSource) fromPath(path string) error {
 	return nil
 }
 
+// seekable returns the reader as a seeker, with its current offset. A reader may have a Seek method that fails: a pipe
+// is an *os.File, and os.Stdin is often a pipe. Such a reader does not count, and nothing has been read from it yet.
+func seekable(reader io.Reader) (io.ReadSeeker, int64, bool) {
+	seeker, ok := reader.(io.ReadSeeker)
+	if !ok {
+		return nil, 0, false
+	}
+	start, err := seeker.Seek(0, io.SeekCurrent)
+	return seeker, start, err == nil
+}
+
 func (s *uploadSource) fromReader(reader io.Reader, size int64) error {
-	if seeker, ok := reader.(io.ReadSeeker); ok {
-		start, err := seeker.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return fmt.Errorf("rask: UploadFile: %w", err)
-		}
+	if seeker, start, ok := seekable(reader); ok {
 		end, err := seeker.Seek(0, io.SeekEnd)
 		if err != nil {
 			return fmt.Errorf("rask: UploadFile: %w", err)

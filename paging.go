@@ -11,6 +11,8 @@ import (
 func pages[L any](ctx context.Context, fetch func(context.Context, *string) (*Response[L], error)) iter.Seq2[*Response[L], error] {
 	return func(yield func(*Response[L], error) bool) {
 		var cursor *string
+		// Every cursor the server has given, not only the last: a cycle such as A, B, A never repeats one in a row.
+		given := map[string]bool{}
 		for {
 			page, err := fetch(ctx, cursor)
 			if err != nil {
@@ -30,10 +32,11 @@ func pages[L any](ctx context.Context, fetch func(context.Context, *string) (*Re
 			if envelope.NextCursor == nil || *envelope.NextCursor == "" {
 				return
 			}
-			if cursor != nil && *cursor == *envelope.NextCursor {
-				yield(nil, fmt.Errorf("rask: the server repeated cursor %q", *cursor))
+			if given[*envelope.NextCursor] {
+				yield(nil, fmt.Errorf("rask: the server repeated cursor %q", *envelope.NextCursor))
 				return
 			}
+			given[*envelope.NextCursor] = true
 			cursor = envelope.NextCursor
 		}
 	}

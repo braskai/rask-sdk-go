@@ -307,10 +307,12 @@ func isRetryableStatus(status int) bool {
 }
 
 // isTransient reports whether an error from a finished call may pass on its own, so a long wait should outlast it.
+// A connection error whose cause the call itself does not retry will not: a certificate that fails verification or a
+// refused redirect is the same on the next poll.
 func isTransient(err error) bool {
 	var connection *ConnectionError
 	if errors.As(err, &connection) {
-		return true
+		return isRetryableTransportError(connection.Err)
 	}
 	var problem *RaskError
 	return errors.As(err, &problem) && isRetryableStatus(problem.Status)

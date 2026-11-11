@@ -15,6 +15,7 @@ import (
 	"iter"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -464,25 +465,43 @@ func (r *scenarioRun) optionsFor(call scenarioCall) []rask.RequestOption {
 	return opts
 }
 
+// callOperation reaches a typed method through the dispatch table. An operation the table does not have (a harness
+// newer than this SDK, a renamed operation) fails that call: calling the missing entry would panic.
+func callOperation(ctx context.Context, client *rask.Client, id string, in *opCall, opts []rask.RequestOption) (*rask.Meta, error) {
+	method, ok := dispatch[id]
+	if !ok {
+		return nil, fmt.Errorf("operation %s is not in the dispatch table", id)
+	}
+	return method(ctx, client, in, opts)
+}
+
 func (r *scenarioRun) runCall(ctx context.Context, call scenarioCall) *callOutcome {
 	outcome := &callOutcome{call: call}
 	in := &opCall{path: call.Path, query: call.Query, body: call.Body, etag: call.IfMatch}
 	switch call.Helper {
 	case "":
-		outcome.meta, outcome.err = dispatch[call.Op](ctx, r.client, in, r.optionsFor(call))
+		outcome.meta, outcome.err = callOperation(ctx, r.client, call.Op, in, r.optionsFor(call))
 	case "first_page":
-		outcome.meta, outcome.err = dispatch[call.Op](ctx, r.client, in, nil)
+		outcome.meta, outcome.err = callOperation(ctx, r.client, call.Op, in, nil)
 	case "next_page":
 		before := r.calls[call.AfterCall]
 		cursor, _ := before.meta.Lookup("/next_cursor")
-		query := map[string]any{"cursor": cursor}
+		// The next page is the earlier call again, path and filters included, with the new cursor in place of its own.
+		query := map[string]any{}
 		for name, value := range before.call.Query {
 			query[name] = value
 		}
-		outcome.call.Op = before.call.Op
-		outcome.meta, outcome.err = dispatch[before.call.Op](ctx, r.client, &opCall{query: query}, nil)
+		query["cursor"] = cursor
+		// The call is kept as it was sent, for a next_page after this one.
+		outcome.call.Op, outcome.call.Path, outcome.call.Query = before.call.Op, before.call.Path, query
+		outcome.meta, outcome.err = callOperation(ctx, r.client, before.call.Op, &opCall{path: before.call.Path, query: query}, nil)
 	case "iterate":
-		outcome.items, outcome.err = iterators[call.Op](ctx, r.client, in, nil)
+		iterate, ok := iterators[call.Op]
+		if !ok {
+			outcome.err = fmt.Errorf("operation %s has no iterator in the dispatch table", call.Op)
+			break
+		}
+		outcome.items, outcome.err = iterate(ctx, r.client, in, nil)
 	case "jobs.wait":
 		jobID := call.JobID
 		if call.JobIDFromCall != nil {
@@ -506,7 +525,7 @@ func (r *scenarioRun) runCall(ctx context.Context, call scenarioCall) *callOutco
 				continue
 			}
 			input := &opCall{path: op.Sample.Path, query: op.Sample.Query, body: op.Sample.Body, etag: op.Sample.Headers["If-Match"]}
-			meta, err := dispatch[op.OperationID](ctx, r.client, input, nil)
+			meta, err := callOperation(ctx, r.client, op.OperationID, input, nil)
 			if err != nil {
 				failures = append(failures, op.OperationID+": "+err.Error())
 			}
@@ -870,7 +889,10 @@ func (r *scenarioRun) check(exp expectation, present []string, records []record)
 		}
 		return nil
 	case "field":
-		if outcome == nil || outcome.meta == nil {
+		if outcome == nil {
+			return []string{fmt.Sprintf("no call %d", index)}
+		}
+		if outcome.meta == nil {
 			return []string{fmt.Sprintf("call raised: %v", outcome.err)}
 		}
 		if exp.RawStatus != nil && outcome.meta.StatusCode != *exp.RawStatus {
@@ -896,6 +918,9 @@ func (r *scenarioRun) check(exp expectation, present []string, records []record)
 		}
 		return checkHeader(exp, outcome, records)
 	case "idempotency_key_exposed":
+		if outcome == nil {
+			return []string{fmt.Sprintf("no call %d", index)}
+		}
 		key := keyOf(outcome)
 		if key == "" {
 			return []string{"the key is not exposed"}
@@ -913,7 +938,10 @@ func (r *scenarioRun) check(exp expectation, present []string, records []record)
 		}
 		return nil
 	case "items":
-		if outcome == nil || outcome.err != nil {
+		if outcome == nil {
+			return []string{fmt.Sprintf("no call %d", index)}
+		}
+		if outcome.err != nil {
 			return []string{fmt.Sprintf("no items: %v", outcome.err)}
 		}
 		if exp.Count != nil && len(outcome.items) != *exp.Count {
@@ -1150,7 +1178,7 @@ func TestEveryOperationIsCallable(t *testing.T) {
 	prefix := h.baseURL[strings.Index(h.baseURL[len("http://"):], "/")+len("http://"):]
 	for _, op := range operations {
 		input := &opCall{path: op.Sample.Path, query: op.Sample.Query, body: op.Sample.Body, etag: op.Sample.Headers["If-Match"]}
-		meta, err := dispatch[op.OperationID](context.Background(), client, input, nil)
+		meta, err := callOperation(context.Background(), client, op.OperationID, input, nil)
 		if err != nil {
 			t.Errorf("%s: %v", op.OperationID, err)
 			continue
@@ -1299,7 +1327,7 @@ func TestEveryQueryParameterEncodes(t *testing.T) {
 			query[parameter.Name] = sampleValue(parameter.Schema, document.Components.Schemas)
 		}
 		input := &opCall{path: op.Sample.Path, query: query, body: op.Sample.Body, etag: op.Sample.Headers["If-Match"]}
-		if _, err := dispatch[op.OperationID](context.Background(), client, input, nil); err != nil {
+		if _, err := callOperation(context.Background(), client, op.OperationID, input, nil); err != nil {
 			t.Errorf("%s: %v", op.OperationID, err)
 			continue
 		}
@@ -1320,5 +1348,77 @@ func TestEveryQueryParameterEncodes(t *testing.T) {
 	t.Logf("%d query parameters over %d operations", total, len(queryByOperation))
 	if total == 0 {
 		t.Fatal("no query parameters found")
+	}
+}
+
+// The scenario runner itself, without a harness. What it cannot run must come out as a failure that /verify hears of:
+// a panic ends the test binary first, and leaves the harness process running.
+
+func TestAnOperationOutsideTheDispatchTableIsAnError(t *testing.T) {
+	run := &scenarioRun{
+		client:     newTestClient(t, "http://127.0.0.1:1"),
+		operations: []operationInfo{{OperationID: "noSuchOperation", HasJSONResponse: true}},
+	}
+	for name, call := range map[string]scenarioCall{
+		"operation":        {Op: "noSuchOperation"},
+		"first_page":       {Helper: "first_page", Op: "noSuchOperation"},
+		"iterate":          {Helper: "iterate", Op: "noSuchOperation"},
+		"sweep_operations": {Helper: "sweep_operations"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			outcome := run.runCall(context.Background(), call)
+			if outcome.err == nil || !strings.Contains(outcome.err.Error(), "noSuchOperation") {
+				t.Errorf("got %v", outcome.err)
+			}
+		})
+	}
+}
+
+func TestNextPageKeepsThePathTheFiltersAndTheNewCursor(t *testing.T) {
+	server := newRecorder(t, func(w http.ResponseWriter, req *http.Request) {
+		next := map[string]string{"c0": "c1", "c1": "c2", "c2": "c3"}[req.URL.Query().Get("cursor")]
+		writeJSON(w, 200, fmt.Sprintf(`{"object":"list","data":[],"next_cursor":%q,"has_more":true}`, next))
+	})
+	run := &scenarioRun{client: newTestClient(t, server.URL)}
+	for _, call := range []scenarioCall{
+		{Helper: "first_page", Op: "listSegments", Path: map[string]any{"project_id": "prj-1"}, Query: map[string]any{"cursor": "c0", "limit": 2, "q": "hola"}},
+		{Helper: "next_page", AfterCall: 0},
+		{Helper: "next_page", AfterCall: 1},
+	} {
+		outcome := run.runCall(context.Background(), call)
+		if outcome.err != nil {
+			t.Fatal(outcome.err)
+		}
+		run.calls = append(run.calls, outcome)
+	}
+	var got []string
+	for _, request := range server.seen() {
+		query, err := url.ParseQuery(request.RawQuery)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, request.Path+"?"+query.Encode()) // Encode sorts the names.
+	}
+	want := []string{
+		"/projects/prj-1/segments?cursor=c0&limit=2&q=hola",
+		"/projects/prj-1/segments?cursor=c1&limit=2&q=hola",
+		"/projects/prj-1/segments?cursor=c2&limit=2&q=hola",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("requests %q, want %q", got, want)
+	}
+}
+
+func TestAnExpectationOfACallThatNeverRanIsAFailure(t *testing.T) {
+	run := &scenarioRun{} // As after a client that could not be built: no calls.
+	for _, kind := range []string{
+		"returned", "raised", "field", "header_exposed", "idempotency_key_exposed", "items", "pages", "progress",
+		"injected_values_preserved",
+	} {
+		t.Run(kind, func(t *testing.T) {
+			if failures := run.check(expectation{Kind: kind}, nil, nil); len(failures) == 0 {
+				t.Error("expected a failure")
+			}
+		})
 	}
 }

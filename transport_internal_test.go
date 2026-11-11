@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -163,6 +164,96 @@ func TestRetryAfterForms(t *testing.T) {
 		if _, ok := parseRetryAfter(http.Header{"Retry-After": {value}}, now); ok {
 			t.Errorf("%q: expected no value", value)
 		}
+	}
+}
+
+// A number beyond a Duration must not come out as whatever the processor gives: a negative wait on amd64, the largest
+// one on arm64. Neither is a wait the server meant, and the code after it adds to the value.
+func TestRetryAfterBeyondADurationIsCapped(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	const longest = (1 << 31) * time.Second
+	for _, value := range []string{"2147483648", "2147483649", "9223372037", "1e20", "1e300", "Inf", "+Infinity", "Fri, 31 Dec 9999 23:59:59 GMT"} {
+		got, ok := parseRetryAfter(http.Header{"Retry-After": {value}}, now)
+		if !ok || got != longest {
+			t.Errorf("%q: %s %v, want %s", value, got, ok, longest)
+		}
+	}
+	if got, ok := parseRetryAfter(http.Header{"Retry-After": {"2147483647"}}, now); !ok || got != longest-time.Second {
+		t.Errorf("a number under the cap changed: %s %v", got, ok)
+	}
+	for _, value := range []string{"NaN", "-Inf"} {
+		if got, ok := parseRetryAfter(http.Header{"Retry-After": {value}}, now); ok {
+			t.Errorf("%q: expected no value, got %s", value, got)
+		}
+	}
+}
+
+// The same number on the wire: the call ends at once with the server's wait on the error, because no budget holds it.
+func TestRetryAfterBeyondADurationEndsRetrying(t *testing.T) {
+	var requests atomic.Int64
+	server := alwaysStatus(t, 429, "1e20", &requests)
+	c := hermeticClient(t, server.URL)
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	clock.install(c)
+	c.now = func() time.Time { // Time passes between two readings, so the wait is added to a time that is not zero.
+		clock.now = clock.now.Add(time.Millisecond)
+		return clock.now
+	}
+	_, err := c.Account.GetMe(context.Background())
+	var limited *RateLimitError
+	if !errors.As(err, &limited) || limited.RetryAfter != (1<<31)*time.Second {
+		t.Fatalf("got %T %v", err, err)
+	}
+	if got := requests.Load(); got != 1 || len(clock.waits) != 0 {
+		t.Fatalf("%d requests, waits %v", got, clock.waits)
+	}
+}
+
+// A failure that no retry can fix ends a wait as it ends a single call. Taken for an outage, it would come back hours
+// later as a timeout, without its cause.
+func TestWaitEndsOnATransportFailureThatCannotPass(t *testing.T) {
+	loop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, req.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer loop.Close()
+	untrusted := httptest.NewUnstartedServer(http.NotFoundHandler())
+	untrusted.Config.ErrorLog = log.New(io.Discard, "", 0) // It would report every handshake this test has refused.
+	untrusted.StartTLS()
+	defer untrusted.Close()
+	for name, baseURL := range map[string]string{"redirect loop": loop.URL, "untrusted certificate": untrusted.URL} {
+		c := hermeticClient(t, baseURL)
+		clock := &fakeClock{now: time.Unix(1000, 0)}
+		clock.install(c)
+		_, err := c.Jobs.Wait(context.Background(), "j")
+		var connection *ConnectionError
+		if !errors.As(err, &connection) || connection.Attempts != 1 || len(clock.waits) != 0 {
+			t.Errorf("%s: got %T %v after %d waits", name, err, err, len(clock.waits))
+		}
+	}
+}
+
+// What may pass still does: a wait outlasts a connection that drops.
+func TestWaitOutlastsADroppedConnection(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		_, _ = io.WriteString(w, `{"object":"job","id":"j","status":"succeeded"}`)
+	}))
+	defer server.Close()
+	c := hermeticClient(t, server.URL)
+	c.maxRetries = 0 // The call itself gives up, so it is the wait that must go on.
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	clock.install(c)
+	if _, err := c.Jobs.Wait(context.Background(), "j"); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 2 || len(clock.waits) != 1 {
+		t.Fatalf("%d requests, waits %v", requests.Load(), clock.waits)
 	}
 }
 

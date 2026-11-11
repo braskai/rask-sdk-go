@@ -3,6 +3,7 @@ package rask
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -94,6 +95,11 @@ func lookupPointer(raw []byte, pointer string) (any, bool) {
 	return node, true
 }
 
+// retryAfterMax caps a Retry-After, given in seconds or as a date. It is 2^31 seconds, the value HTTP caching takes for
+// a number of seconds too large to hold (RFC 9111, 1.2.2): about 68 years, so a time or another wait can still be added
+// to it.
+const retryAfterMax = (1 << 31) * time.Second
+
 // parseRetryAfter reads Retry-After as seconds or as an HTTP date.
 func parseRetryAfter(header http.Header, now time.Time) (time.Duration, bool) {
 	value := strings.TrimSpace(header.Get("Retry-After"))
@@ -101,14 +107,16 @@ func parseRetryAfter(header http.Header, now time.Time) (time.Duration, bool) {
 		return 0, false
 	}
 	if seconds, err := strconv.ParseFloat(value, 64); err == nil {
-		if seconds < 0 {
+		if seconds < 0 || math.IsNaN(seconds) { // ParseFloat reads "NaN" as a number.
 			return 0, false
 		}
-		return time.Duration(seconds * float64(time.Second)), true
+		// Capped as a float, like the backoff: one beyond int64 converts to a negative duration on amd64.
+		return time.Duration(min(seconds*float64(time.Second), float64(retryAfterMax))), true
 	}
 	if at, err := http.ParseTime(value); err == nil {
 		if wait := at.Sub(now); wait > 0 {
-			return wait, true
+			// A date in the year 9999 is the longest duration there is, and adding anything to that overflows.
+			return min(wait, retryAfterMax), true
 		}
 		return 0, true
 	}

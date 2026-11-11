@@ -567,6 +567,44 @@ func TestUploadSeekableStreamIsReadFromItsOffsetOnEveryAttempt(t *testing.T) {
 	}
 }
 
+// A pipe is an *os.File, so it has a Seek method, and the method fails: os.Stdin fed by another program is one.
+func TestUploadStreamWhoseSeekFailsIsSentWholeOnEveryAttempt(t *testing.T) {
+	content := strings.Repeat("x", 100)
+	var attempts atomic.Int64
+	storage := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(503)
+			return
+		}
+		w.WriteHeader(200)
+	})
+	apiServer := newRecorder(t, uploadAPI(t, func() string { return storage.URL + "/o?X-Amz-Signature=s" }))
+	client := newTestClient(t, apiServer.URL+"/rask/v3")
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if _, err := io.WriteString(writer, content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Uploads.UploadFile(context.Background(), rask.UploadFileParams{Reader: reader, Filename: "a.mp3"}); err != nil {
+		t.Fatal(err)
+	}
+	puts := storage.seen()
+	if len(puts) != 2 {
+		t.Fatalf("%d PUTs", len(puts))
+	}
+	for _, put := range puts {
+		if string(put.Body) != content {
+			t.Errorf("PUT body %q", put.Body)
+		}
+	}
+}
+
 func TestUploadArgumentsAreCheckedBeforeAnyRequest(t *testing.T) {
 	server := newRecorder(t, func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, meJSON) })
 	client := newTestClient(t, server.URL)
@@ -807,6 +845,32 @@ func TestPagerRefusesARepeatedCursor(t *testing.T) {
 	}
 	if last == nil || !strings.Contains(last.Error(), "repeated cursor") {
 		t.Fatalf("got %v", last)
+	}
+}
+
+// A cycle repeats a cursor too, though never twice in a row: A, B, then A again.
+func TestPagerRefusesACursorCycle(t *testing.T) {
+	server := newRecorder(t, func(w http.ResponseWriter, req *http.Request) {
+		next := "A"
+		if req.URL.Query().Get("cursor") == "A" {
+			next = "B"
+		}
+		writeJSON(w, 200, fmt.Sprintf(`{"object":"list","data":[{"id":"a"}],"next_cursor":%q,"has_more":true}`, next))
+	})
+	client := newTestClient(t, server.URL)
+	var last error
+	items := 0
+	for _, err := range client.Folders.ListFoldersAll(context.Background(), nil) {
+		last = err
+		if items++; items > 10 {
+			t.Fatal("the pager follows the cycle")
+		}
+	}
+	if last == nil || !strings.Contains(last.Error(), `repeated cursor "A"`) {
+		t.Fatalf("got %v", last)
+	}
+	if got := len(server.seen()); got != 3 {
+		t.Fatalf("%d requests, want 3", got)
 	}
 }
 
