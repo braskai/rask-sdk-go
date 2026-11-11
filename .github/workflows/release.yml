@@ -26,6 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # the tag and the GitHub Release
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      module: ${{ steps.version.outputs.module }}
     steps:
       - name: Only from the default branch
         env:
@@ -39,6 +42,7 @@ jobs:
         with:
           persist-credentials: false
       - name: The version is new
+        id: version
         run: |
           version=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' version.go)
           module=$(sed -n 's/^module //p' go.mod)
@@ -62,7 +66,8 @@ jobs:
             exit 1
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "MODULE=$module" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "module=$module" >> "$GITHUB_OUTPUT"
       - name: Tag the version and make the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,7 +76,16 @@ jobs:
           set -- "v$VERSION" --target "$GITHUB_SHA" --generate-notes
           case "$VERSION" in *-*) set -- "$@" --prerelease ;; esac
           gh release create "$@"
-      - name: Ask the proxy and the checksum database for the version
+
+  # A job of its own, so that it can be run again by itself: a second run of the job above stops at the tag it made.
+  proxy:
+    name: Ask the proxy and the checksum database for the version
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          VERSION: ${{ needs.release.outputs.version }}
+          MODULE: ${{ needs.release.outputs.module }}
         run: |
           curl -fsS --retry 5 --retry-delay 10 --retry-all-errors "https://proxy.golang.org/$MODULE/@v/v$VERSION.info"
           echo
